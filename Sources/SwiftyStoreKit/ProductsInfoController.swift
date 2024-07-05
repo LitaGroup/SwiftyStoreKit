@@ -25,7 +25,7 @@
 import Foundation
 import StoreKit
 
-protocol InAppProductRequestBuilder: AnyObject {
+protocol InAppProductRequestBuilder: class {
     func request(productIds: Set<String>, callback: @escaping InAppProductRequestCallback) -> InAppProductRequest
 }
 
@@ -44,8 +44,12 @@ class ProductsInfoController: NSObject {
     }
     
     let inAppProductRequestBuilder: InAppProductRequestBuilder
+
+    private var spinLock: OSSpinLock
+
     init(inAppProductRequestBuilder: InAppProductRequestBuilder = InAppProductQueryRequestBuilder()) {
         self.inAppProductRequestBuilder = inAppProductRequestBuilder
+        self.spinLock = OSSpinLock()
     }
     
     // As we can have multiple inflight requests, we store them in a dictionary by product ids
@@ -53,10 +57,17 @@ class ProductsInfoController: NSObject {
 
     @discardableResult
     func retrieveProductsInfo(_ productIds: Set<String>, completion: @escaping (RetrieveResults) -> Void) -> InAppProductRequest {
-
+        OSSpinLockLock(&self.spinLock)
+        defer {
+          OSSpinLockUnlock(&self.spinLock)
+        }
         if inflightRequests[productIds] == nil {
             let request = inAppProductRequestBuilder.request(productIds: productIds) { results in
-                
+                OSSpinLockLock(&self.spinLock)
+                defer {
+                  OSSpinLockUnlock(&self.spinLock)
+                }
+
                 if let query = self.inflightRequests[productIds] {
                     for completion in query.completionHandlers {
                         completion(results)
@@ -69,21 +80,9 @@ class ProductsInfoController: NSObject {
             }
             inflightRequests[productIds] = InAppProductQuery(request: request, completionHandlers: [completion])
             request.start()
-
             return request
-
         } else {
-            
             inflightRequests[productIds]!.completionHandlers.append(completion)
-
-            let query = inflightRequests[productIds]!
-
-            if query.request.hasCompleted {
-                query.completionHandlers.forEach {
-                    $0(query.request.cachedResults!)
-                }
-            }
-
             return inflightRequests[productIds]!.request
         }
     }
